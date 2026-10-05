@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"url-shortener/internal/models"
 	"url-shortener/internal/utils"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -17,19 +18,6 @@ func NewURLHandler(pool *pgxpool.Pool) *URLHandler {
 	return &URLHandler{pool: pool}
 }
 
-type CreateURLRequest struct {
-	URL string `json:"url"`
-}
-
-type URL struct {
-	ID          int    `json:"id"`
-	ShortCode   string `json:"short_code"`
-	OriginalURL string `json:"original_url"`
-}
-
-// Package-level variables
-var urls = make(map[string]URL)
-
 func Welcome(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -42,7 +30,7 @@ func HandleHealth(w http.ResponseWriter, r *http.Request) {
 
 // Create URL Handler
 func (h *URLHandler) CreateURLHandler(w http.ResponseWriter, r *http.Request) {
-	var request CreateURLRequest
+	var request models.CreateURLRequest
 
 	err := json.NewDecoder(r.Body).Decode(&request)
 	if err != nil {
@@ -50,63 +38,62 @@ func (h *URLHandler) CreateURLHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	url := URL{
-		ID:          len(urls) + 1,
-		ShortCode:   utils.GenerateShortCode(6),
-		OriginalURL: request.URL,
-	}
-
+	newShortCode := utils.GenerateShortCode(6)
 	_, resErr := h.pool.Exec(
 		r.Context(),
-		"INSERT INTO urls (short_code, original_url, access_count) VALUES ($1, $2, 0)", url.ShortCode, url.OriginalURL,
+		"INSERT INTO urls (short_code, original_url) VALUES ($1, $2)", newShortCode, request.URL,
 	)
-
 	if resErr != nil {
 		fmt.Println("Database error: ", resErr)
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
 
-	urls[url.ShortCode] = url
-
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 
-	json.NewEncoder(w).Encode(url)
+	json.NewEncoder(w).Encode(map[string]string{
+		"short_code": newShortCode,
+	})
 }
 
 // Get Original URL Handler
 func (h *URLHandler) GetOriginalURL(w http.ResponseWriter, r *http.Request) {
+
 	if r.URL.Query().Get("short_code") == "" {
 		http.Error(w, "Missing short_code parameter", http.StatusBadRequest)
 		return
 	}
 
-	var url URL
-
-	row := h.pool.QueryRow(
+	var url models.URL
+	resErr := h.pool.QueryRow(
 		r.Context(),
-		"SELECT id, short_code, original_url FROM urls WHERE short_code = $1", r.URL.Query().Get("short_code"),
-	)
-
-	resErr := row.Scan(&url.ID, &url.ShortCode, &url.OriginalURL)
-
+		"SELECT id, short_code, original_url, access_count + 1, created_at, updated_at FROM urls WHERE short_code = $1", r.URL.Query().Get("short_code"),
+	).Scan(&url.ID, &url.ShortCode, &url.OriginalURL, &url.AccessCount, &url.CreatedAt, &url.UpdatedAt)
+	// Short Code not found in the database (pgx.ErrNoRows)
+	if resErr != nil && resErr.Error() == "no rows in result set" {
+		http.Error(w, "Short URL not found", http.StatusNotFound)
+		return
+	}
 	if resErr != nil {
 		fmt.Println("Database error: ", resErr)
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
 
-	// shortCode := r.URL.Query().Get("short_code")
-	// urlLokal, exists := urls[shortCode]
-
-	// if !exists {
-	// 	http.Error(w, "Short URL not found", http.StatusNotFound)
-	// 	return
-	// }
+	// Increament the access count for the retrieved URL
+	_, updateErr := h.pool.Exec(
+		r.Context(),
+		"UPDATE urls SET access_count = access_count + 1 WHERE short_code = $1", r.URL.Query().Get("short_code"),
+	)
+	if updateErr != nil {
+		fmt.Println("Database error: ", updateErr)
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(url.OriginalURL)
+	json.NewEncoder(w).Encode(url)
 }
 
 // Update URL Handler
@@ -118,23 +105,29 @@ func (h *URLHandler) UpdateURLHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, exists := urls[shortCode]
-	if !exists {
-		http.Error(w, "Short URL not found", http.StatusNotFound)
-		return
-	}
-
-	var newURL CreateURLRequest
+	var newURL models.CreateURLRequest
 	err := json.NewDecoder(r.Body).Decode(&newURL)
 	if err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
 
-	// Update the original URL for the given short code
-	url := urls[shortCode]
-	url.OriginalURL = newURL.URL
-	urls[shortCode] = url
+	result, errPool := h.pool.Exec(
+		r.Context(),
+		"UPDATE urls SET original_url = $1, access_count = access_count + 1, updated_at = NOW() WHERE short_code = $2;", newURL.URL, r.URL.Query().Get("short_code"))
+
+	if errPool != nil {
+		fmt.Println("Database error: ", errPool)
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message":    "URL updated successfully",
+		"new_result": result.RowsAffected(),
+	})
 }
 
 // Delete URL Handler
@@ -145,12 +138,19 @@ func (h *URLHandler) DeleteURLHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, exists := urls[shortCode]
-	if !exists {
+	result, err := h.pool.Exec(
+		r.Context(),
+		"DELETE FROM urls WHERE short_code = $1", shortCode,
+	)
+	if result.RowsAffected() == 0 {
 		http.Error(w, "Short URL not found", http.StatusNotFound)
 		return
 	}
+	if err != nil {
+		fmt.Println("Database error: ", err)
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
 
-	delete(urls, shortCode)
 	w.WriteHeader(http.StatusNoContent) // 204 No Content
 }
