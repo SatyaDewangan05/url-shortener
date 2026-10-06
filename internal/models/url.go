@@ -2,7 +2,7 @@ package models
 
 import "time"
 
-type CreateURLRequest struct {
+type URLRequest struct {
 	URL string `json:"url"`
 }
 

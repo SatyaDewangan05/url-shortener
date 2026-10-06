@@ -2,7 +2,6 @@ package database
 
 import (
 	"context"
-	"log"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -14,7 +13,7 @@ func ConnectToDatabase(databaseURL string) (*pgxpool.Pool, error) {
 	)
 
 	if err != nil {
-		log.Fatal(err)
+		return pool, nil
 	}
 
 	return pool, nil

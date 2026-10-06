@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"url-shortener/internal/database"
 	"url-shortener/internal/handler"
+	"url-shortener/internal/repository"
+	"url-shortener/internal/service"
 )
 
 var mux = http.NewServeMux()
@@ -16,14 +18,23 @@ func main() {
 	// Connect to DB
 	const databaseURL = "postgres://postgres:postgres@localhost:5432/url_shortener"
 
-	pool, dbErr := database.ConnectToDatabase(databaseURL)
+	pool, err := database.ConnectToDatabase(databaseURL)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer pool.Close()
 
-	dbErr = pool.Ping(context.Background())
-	if dbErr != nil {
-		log.Fatal(dbErr)
+	// Check DB connection
+	err = pool.Ping(context.Background())
+	if err != nil {
+		log.Fatal(err)
 	}
 
-	urlHandler := handler.NewURLHandler(pool)
+	fmt.Println("Database Connected Successfully")
+	
+	urlRepository := repository.NewURLRepository(pool)
+	urlService := service.NewURLService(urlRepository)
+	urlHandler := handler.NewURLHandler(urlService)
 
 	// Welcome
 	mux.HandleFunc("GET /", handler.Welcome)
@@ -33,17 +44,18 @@ func main() {
 
 	// Create URL
 	mux.HandleFunc("POST /api/v1/url", urlHandler.CreateURLHandler)
+	
 	// Retrieve URL
-	mux.HandleFunc("GET /api/v1/url/", urlHandler.GetOriginalURL)
+	mux.HandleFunc("GET /api/v1/url", urlHandler.GetOriginalURL)
 
 	// Update URL
-	mux.HandleFunc("PUT /api/v1/url/", urlHandler.UpdateURLHandler)
+	mux.HandleFunc("PUT /api/v1/url", urlHandler.UpdateURLHandler)
 	// Delete URL
-	mux.HandleFunc("DELETE /api/v1/url/", urlHandler.DeleteURLHandler)
+	mux.HandleFunc("DELETE /api/v1/url", urlHandler.DeleteURLHandler)
 
 	// Stats on URL usage
 
-	err := http.ListenAndServe(":8080", mux)
+	err = http.ListenAndServe(":8080", mux)
 	if err != nil {
 		fmt.Println("Server failed: ", err)
 	} else {
@@ -52,3 +64,8 @@ func main() {
 
 	pool.Close()
 }
+
+
+
+
+
